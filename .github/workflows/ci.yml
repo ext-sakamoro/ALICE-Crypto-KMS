@@ -39,7 +39,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with: { node-version: 22 }
-      - run: cd frontend && npm ci || npm install
+      # `cd x && a || b` は SC2015 (A && B || C は if-then-else ではない) に当たる
+      # cd を分けて npm ci の失敗時だけ npm install に落とす意図を明示する
+      - run: |
+          cd frontend
+          npm ci || npm install
       - run: cd frontend && npm run type-check
 
 

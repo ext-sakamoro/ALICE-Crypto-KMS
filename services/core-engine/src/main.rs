@@ -1,10 +1,38 @@
+//! ALICE Crypto KMS — core engine
+//!
+//! # 実装状況 (2026-09-27)
+//!
+//! **鍵管理と暗号処理は未実装** `/health` と `/api/v1/kms/stats` 以外の
+//! endpoint は `501 Not Implemented` を返す
+//!
+//! 2026-09-27 まで、これらの endpoint は動作しているように見える応答を
+//! 返していたが中身はフェイクだった:
+//!
+//! - `encrypt` — FNV-1a hash を hex 整形して `ciphertext` / `nonce` / `tag`
+//!   として返し、`algorithm` に `"chacha20-poly1305"` と申告していた
+//!   (暗号化は一切行われていない)
+//! - `decrypt` — 入力の `ciphertext` / `nonce` / `tag` / `aad` を読まず、
+//!   固定文字列 `"[decrypted content]"` を返して `verified: true` と申告
+//! - `create_key` — 鍵素材を生成も保存もせず UUID と固定 timestamp を返す
+//! - `shamir/split` — Shamir の秘密分散ではなく FNV-1a 由来の文字列を share
+//!   として返す (threshold 個集めても復元できない)
+//! - `shamir/recover` — share の**個数だけ**見て固定文字列を返す
+//! - `algorithms` — 未実装の AEAD 3 方式を利用可能として広告
+//!
+//! KMS がこの状態で本番に出ると「暗号化されていないデータを暗号化済と
+//! 誤認する」ため、嘘の応答をやめて fail fast にした
+//! (CLAUDE.md § 仮実装完了偽装の禁止ルール)
+//!
+//! 本実装は `alice-crypto` の AEAD を wire する形で別途行う
+
 use axum::{
     extract::State,
+    http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tower_http::cors::{Any, CorsLayer};
@@ -14,6 +42,9 @@ struct AppState {
     start_time: Instant,
     stats: Mutex<Stats>,
 }
+
+/// 実処理が未実装なので、暗号処理系の counter は常に 0 のままになる
+/// (`stats` endpoint が 0 を返すのは「使われていない」ではなく「未実装」)
 struct Stats {
     total_encryptions: u64,
     total_decryptions: u64,
@@ -30,92 +61,6 @@ struct Health {
     total_ops: u64,
 }
 
-#[derive(Deserialize)]
-struct CreateKeyRequest {
-    algorithm: Option<String>,
-    key_size: Option<u32>,
-    purpose: Option<String>,
-    rotation_days: Option<u32>,
-}
-#[derive(Serialize)]
-struct CreateKeyResponse {
-    key_id: String,
-    algorithm: String,
-    key_size: u32,
-    purpose: String,
-    rotation_days: u32,
-    status: String,
-    created_at: String,
-}
-
-#[derive(Deserialize)]
-struct EncryptRequest {
-    key_id: String,
-    plaintext: String,
-    aad: Option<String>,
-}
-#[derive(Serialize)]
-struct EncryptResponse {
-    ciphertext: String,
-    nonce: String,
-    tag: String,
-    key_id: String,
-    algorithm: String,
-    elapsed_us: u128,
-}
-
-#[derive(Deserialize)]
-struct DecryptRequest {
-    key_id: String,
-    ciphertext: String,
-    nonce: String,
-    tag: String,
-    aad: Option<String>,
-}
-#[derive(Serialize)]
-struct DecryptResponse {
-    plaintext: String,
-    key_id: String,
-    verified: bool,
-    elapsed_us: u128,
-}
-
-#[derive(Deserialize)]
-struct ShamirSplitRequest {
-    secret: String,
-    total_shares: Option<u8>,
-    threshold: Option<u8>,
-}
-#[derive(Serialize)]
-struct ShamirSplitResponse {
-    split_id: String,
-    total_shares: u8,
-    threshold: u8,
-    shares: Vec<String>,
-    status: String,
-}
-
-#[derive(Deserialize)]
-struct ShamirRecoverRequest {
-    shares: Vec<String>,
-    threshold: Option<u8>,
-}
-#[derive(Serialize)]
-struct ShamirRecoverResponse {
-    recovered: bool,
-    secret: String,
-    shares_used: u8,
-    elapsed_us: u128,
-}
-
-#[derive(Serialize)]
-struct AlgorithmInfo {
-    name: String,
-    description: String,
-    key_sizes: Vec<u32>,
-    mode: String,
-    security_level: String,
-}
 #[derive(Serialize)]
 struct StatsResponse {
     total_encryptions: u64,
@@ -123,6 +68,13 @@ struct StatsResponse {
     total_keys_created: u64,
     total_shares_split: u64,
     bytes_encrypted: u64,
+}
+
+#[derive(Serialize)]
+struct NotImplemented {
+    error: &'static str,
+    detail: &'static str,
+    endpoint: &'static str,
 }
 
 #[tokio::main]
@@ -149,6 +101,8 @@ async fn main() {
         .allow_headers(Any);
     let app = Router::new()
         .route("/health", get(health))
+        // 未実装 (2026-09-27): 404 ではなく 501 を返して「route はあるが
+        // 機能が無い」ことを client に明示する
         .route("/api/v1/kms/keys/create", post(create_key))
         .route("/api/v1/kms/encrypt", post(encrypt))
         .route("/api/v1/kms/decrypt", post(decrypt))
@@ -161,7 +115,10 @@ async fn main() {
         .with_state(state);
     let addr = std::env::var("CRYPTO_ADDR").unwrap_or_else(|_| "0.0.0.0:8081".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    tracing::info!("Crypto KMS Engine on {addr}");
+    tracing::warn!(
+        "Crypto KMS Engine on {addr} — key management and crypto operations are NOT implemented; \
+         every endpoint except /health and /api/v1/kms/stats returns 501"
+    );
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -175,132 +132,6 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
     })
 }
 
-async fn create_key(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<CreateKeyRequest>,
-) -> Json<CreateKeyResponse> {
-    let algo = req.algorithm.unwrap_or_else(|| "chacha20-poly1305".into());
-    let size = req.key_size.unwrap_or(256);
-    let purpose = req.purpose.unwrap_or_else(|| "encrypt-decrypt".into());
-    let rotation = req.rotation_days.unwrap_or(90);
-    s.stats.lock().unwrap().total_keys_created += 1;
-    Json(CreateKeyResponse {
-        key_id: format!("key_{}", uuid::Uuid::new_v4()),
-        algorithm: algo,
-        key_size: size,
-        purpose,
-        rotation_days: rotation,
-        status: "active".into(),
-        created_at: "2026-02-23T00:00:00Z".into(),
-    })
-}
-
-async fn encrypt(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<EncryptRequest>,
-) -> Json<EncryptResponse> {
-    let t = Instant::now();
-    let h = fnv1a(req.plaintext.as_bytes());
-    {
-        let mut st = s.stats.lock().unwrap();
-        st.total_encryptions += 1;
-        st.bytes_encrypted += req.plaintext.len() as u64;
-    }
-    Json(EncryptResponse {
-        ciphertext: format!("{:032x}", h),
-        nonce: format!("{:024x}", h.wrapping_mul(31)),
-        tag: format!("{:032x}", h.wrapping_mul(47)),
-        key_id: req.key_id,
-        algorithm: "chacha20-poly1305".into(),
-        elapsed_us: t.elapsed().as_micros(),
-    })
-}
-
-async fn decrypt(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<DecryptRequest>,
-) -> Json<DecryptResponse> {
-    let t = Instant::now();
-    s.stats.lock().unwrap().total_decryptions += 1;
-    Json(DecryptResponse {
-        plaintext: "[decrypted content]".into(),
-        key_id: req.key_id,
-        verified: true,
-        elapsed_us: t.elapsed().as_micros(),
-    })
-}
-
-async fn shamir_split(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<ShamirSplitRequest>,
-) -> Json<ShamirSplitResponse> {
-    let total = req.total_shares.unwrap_or(5);
-    let threshold = req.threshold.unwrap_or(3);
-    let h = fnv1a(req.secret.as_bytes());
-    let shares: Vec<String> = (0..total)
-        .map(|i| {
-            format!(
-                "share_{}_{:016x}",
-                i + 1,
-                h.wrapping_add(i as u64 * 0x1234_5678)
-            )
-        })
-        .collect();
-    s.stats.lock().unwrap().total_shares_split += 1;
-    Json(ShamirSplitResponse {
-        split_id: uuid::Uuid::new_v4().to_string(),
-        total_shares: total,
-        threshold,
-        shares,
-        status: "split".into(),
-    })
-}
-
-async fn shamir_recover(
-    State(_s): State<Arc<AppState>>,
-    Json(req): Json<ShamirRecoverRequest>,
-) -> Json<ShamirRecoverResponse> {
-    let t = Instant::now();
-    let threshold = req.threshold.unwrap_or(3);
-    let enough = req.shares.len() >= threshold as usize;
-    Json(ShamirRecoverResponse {
-        recovered: enough,
-        secret: if enough {
-            "[recovered secret]".into()
-        } else {
-            "".into()
-        },
-        shares_used: req.shares.len() as u8,
-        elapsed_us: t.elapsed().as_micros(),
-    })
-}
-
-async fn algorithms() -> Json<Vec<AlgorithmInfo>> {
-    Json(vec![
-        AlgorithmInfo {
-            name: "chacha20-poly1305".into(),
-            description: "ChaCha20-Poly1305 AEAD with information-theoretic security".into(),
-            key_sizes: vec![256],
-            mode: "AEAD".into(),
-            security_level: "256-bit".into(),
-        },
-        AlgorithmInfo {
-            name: "aes-256-gcm".into(),
-            description: "AES-256 in GCM mode".into(),
-            key_sizes: vec![256],
-            mode: "AEAD".into(),
-            security_level: "256-bit".into(),
-        },
-        AlgorithmInfo {
-            name: "xchacha20-poly1305".into(),
-            description: "Extended nonce ChaCha20-Poly1305".into(),
-            key_sizes: vec![256],
-            mode: "AEAD".into(),
-            security_level: "256-bit".into(),
-        },
-    ])
-}
-
 async fn stats(State(s): State<Arc<AppState>>) -> Json<StatsResponse> {
     let st = s.stats.lock().unwrap();
     Json(StatsResponse {
@@ -312,11 +143,63 @@ async fn stats(State(s): State<Arc<AppState>>) -> Json<StatsResponse> {
     })
 }
 
-fn fnv1a(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
+/// 未実装 endpoint の共通応答 request body は読まない (読んだところで
+/// 処理できないため、部分的に処理したように見せない)
+fn not_implemented(
+    endpoint: &'static str,
+    detail: &'static str,
+) -> (StatusCode, Json<NotImplemented>) {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(NotImplemented {
+            error: "not_implemented",
+            detail,
+            endpoint,
+        }),
+    )
+}
+
+async fn create_key() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/keys/create",
+        "key generation and storage are not implemented; no key material is created",
+    )
+}
+
+async fn encrypt() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/encrypt",
+        "AEAD encryption is not implemented; this endpoint previously returned an FNV-1a hash \
+         labelled as chacha20-poly1305 ciphertext",
+    )
+}
+
+async fn decrypt() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/decrypt",
+        "AEAD decryption and tag verification are not implemented; this endpoint previously \
+         returned a fixed placeholder string with verified = true",
+    )
+}
+
+async fn shamir_split() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/shamir/split",
+        "Shamir secret sharing is not implemented; the previous shares were FNV-1a derived \
+         strings that could not reconstruct the secret",
+    )
+}
+
+async fn shamir_recover() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/shamir/recover",
+        "Shamir reconstruction is not implemented; the previous response only counted the shares",
+    )
+}
+
+async fn algorithms() -> (StatusCode, Json<NotImplemented>) {
+    not_implemented(
+        "/api/v1/kms/algorithms",
+        "no AEAD algorithm is implemented, so none can be advertised as available",
+    )
 }

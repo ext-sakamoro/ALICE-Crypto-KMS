@@ -1,5 +1,22 @@
 # ALICE-Crypto-KMS
 
+> ## ⚠️ 実装状況: 鍵管理と暗号処理は未実装 (2026-09-27)
+>
+> `services/core-engine` が提供しているのは **`/health` と `/api/v1/kms/stats` だけ**
+> です 他の endpoint (`/keys/create` / `/encrypt` / `/decrypt` / `/shamir/split` /
+> `/shamir/recover` / `/algorithms`) は **`501 Not Implemented`** を返します
+>
+> 2026-09-27 まで、これらは動作しているように見える応答を返していましたが中身は
+> フェイクでした — `encrypt` は FNV-1a hash を hex 整形して ciphertext として返し
+> `algorithm` に `chacha20-poly1305` と申告し、`decrypt` は入力を読まずに固定文字列を
+> 返して `verified: true` と申告し、`shamir/split` は復元できない文字列を share として
+> 返していました KMS がこの状態で使われると **暗号化されていないデータを暗号化済と
+> 誤認する**ため、嘘の応答をやめて fail fast にしました
+>
+> **以下の機能一覧は設計目標であり、現時点の実装ではありません**
+> 本実装は `alice-crypto` の AEAD を wire する形で別途行います
+> (`alice-core` feature に optional dep として配線済、未使用)
+
 Cryptographic Key Management Service built on Project A.L.I.C.E. —
 ChaCha20-Poly1305 and AES-256-GCM AEAD encryption, Shamir Secret Sharing
 with k-of-n threshold recovery, automated key rotation, and information-theoretic
