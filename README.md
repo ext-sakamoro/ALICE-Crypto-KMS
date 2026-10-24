@@ -122,4 +122,6 @@ curl -X POST http://localhost:8081/api/v1/kms/shamir/recover \
 
 ## License
 
-AGPL-3.0-or-later — see [LICENSE](./LICENSE)
+`LicenseRef-Proprietary`. The text is [LICENSE-Proprietary](LICENSE-Proprietary).
+
+Enquiries: https://extoria.co.jp/
