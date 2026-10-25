@@ -112,7 +112,7 @@ curl -X POST http://localhost:8081/api/v1/kms/decrypt \
 # Split (3-of-5)
 curl -X POST http://localhost:8081/api/v1/kms/shamir/split \
   -H "Content-Type: application/json" \
-  -d '{"secret":"bXlfc3VwZXJfc2VjcmV0","threshold":3,"total_shares":5}'
+  -d '{"secret":"<base64 of your secret>","threshold":3,"total_shares":5}'
 
 # Recover with any 3 shares
 curl -X POST http://localhost:8081/api/v1/kms/shamir/recover \
