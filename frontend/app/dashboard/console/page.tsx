@@ -40,7 +40,7 @@ export default function ConsolePage() {
   // shamir tab
   const [shamirSplitPayload, setShamirSplitPayload] = useState(
     JSON.stringify(
-      { secret: "bXlfc3VwZXJfc2VjcmV0", threshold: 3, total_shares: 5 },
+      { secret: "", threshold: 3, total_shares: 5 },
       null,
       2
     )
